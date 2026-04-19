@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orderbook WebSocket Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #fff;
+      padding: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .panel {
+      background: #2a2a2a;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #444;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      font-weight: bold;
+    }
+    .status.connected {
+      background: #0a5;
+      color: #fff;
+    }
+    .status.disconnected {
+      background: #a50;
+      color: #fff;
+    }
+    button {
+      background: #0a5;
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #0c7;
+    }
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    .log {
+      background: #1a1a1a;
+      padding: 10px;
+      border-radius: 4px;
+      height: 400px;
+      overflow-y: auto;
+      font-size: 12px;
+      border: 1px solid #444;
+    }
+    .log-entry {
+      margin: 5px 0;
+      padding: 5px;
+      border-left: 3px solid #0a5;
+      padding-left: 10px;
+    }
+    .log-entry.snapshot {
+      border-left-color: #0af;
+    }
+    .log-entry.delta {
+      border-left-color: #fa0;
+    }
+    .log-entry.error {
+      border-left-color: #f00;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 15px;
+    }
+    .stat {
+      background: #333;
+      padding: 10px;
+      border-radius: 4px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 24px;
+      font-weight: bold;
+      color: #0af;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #aaa;
+      margin-top: 5px;
+    }
+    h2 {
+      margin-top: 0;
+      color: #0af;
+    }
+    .orderbook-preview {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .orderbook-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 5px;
+      border-bottom: 1px solid #333;
+    }
+    .bid {
+      color: #0a5;
+    }
+    .ask {
+      color: #f50;
+    }
+  </style>
+</head>
+<body>
+  <h1>Orderbook WebSocket Test Client</h1>
+  
+  <div class="container">
+    <div class="panel">
+      <h2>Connection</h2>
+      <div id="status" class="status disconnected">Disconnected</div>
+      <div>
+        <input type="text" id="wsUrl" value="ws://localhost:8080" style="width: 200px; padding: 8px; margin-right: 10px; background: #333; color: #fff; border: 1px solid #555; border-radius: 4px;">
+        <button id="connectBtn" onclick="connect()">Connect</button>
+        <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+      </div>
+      
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-value" id="messageCount">0</div>
+          <div class="stat-label">Messages</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="lastSequence">-</div>
+          <div class="stat-label">Last Sequence</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" id="gapCount">0</div>
+          <div class="stat-label">Gaps Detected</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Orderbook Preview</h2>
+      <div class="orderbook-preview" id="orderbookPreview">
+        <div style="text-align: center; color: #666; padding: 20px;">
+          Connect to see orderbook data
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: 20px;">
+    <h2>Message Log</h2>
+    <button onclick="clearLog()">Clear Log</button>
+    <div id="log" class="log"></div>
+  </div>
+
+  <script>
+    let ws = null
+    let lastSequence = null
+    let messageCount = 0
+    let gapCount = 0
+    let orderbook = { bids: new Map(), asks: new Map() }
+
+    function updateStatus(connected) {
+      const statusEl = document.getElementById('status')
+      const connectBtn = document.getElementById('connectBtn')
+      const disconnectBtn = document.getElementById('disconnectBtn')
+      
+      if (connected) {
+        statusEl.textContent = 'Connected'
+        statusEl.className = 'status connected'
+        connectBtn.disabled = true
+        disconnectBtn.disabled = false
+      } else {
+        statusEl.textContent = 'Disconnected'
+        statusEl.className = 'status disconnected'
+        connectBtn.disabled = false
+        disconnectBtn.disabled = true
+      }
+    }
+
+    function addLog(message, type = 'info') {
+      const log = document.getElementById('log')
+      const entry = document.createElement('div')
+      entry.className = `log-entry ${type}`
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`
+      log.appendChild(entry)
+      log.scrollTop = log.scrollHeight
+    }
+
+    function updateStats() {
+      document.getElementById('messageCount').textContent = messageCount
+      document.getElementById('lastSequence').textContent = lastSequence ?? '-'
+      document.getElementById('gapCount').textContent = gapCount
+    }
+
+    function updateOrderbookPreview() {
+      const preview = document.getElementById('orderbookPreview')
+      const sortedBids = Array.from(orderbook.bids.entries())
+        .sort((a, b) => b[0] - a[0])
+        .slice(0, 10)
+      const sortedAsks = Array.from(orderbook.asks.entries())
+        .sort((a, b) => a[0] - b[0])
+        .slice(0, 10)
+
+      let html = '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">'
+      
+      html += '<div><h3 style="color: #0a5; margin: 10px 0;">Bids (Top 10)</h3>'
+      sortedBids.forEach(([price, size]) => {
+        html += `<div class="orderbook-row bid">`
+        html += `<span>$${price.toFixed(2)}</span>`
+        html += `<span style="text-align: right;">${size.toFixed(3)}</span>`
+        html += `</div>`
+      })
+      html += '</div>'
+
+      html += '<div><h3 style="color: #f50; margin: 10px 0;">Asks (Top 10)</h3>'
+      sortedAsks.forEach(([price, size]) => {
+        html += `<div class="orderbook-row ask">`
+        html += `<span>$${price.toFixed(2)}</span>`
+        html += `<span style="text-align: right;">${size.toFixed(3)}</span>`
+        html += `</div>`
+      })
+      html += '</div>'
+
+      html += '</div>'
+      preview.innerHTML = html
+    }
+
+    function connect() {
+      const url = document.getElementById('wsUrl').value
+      
+      try {
+        ws = new WebSocket(url)
+        
+        ws.onopen = () => {
+          addLog('Connected to server', 'info')
+          updateStatus(true)
+          ws.send(JSON.stringify({ type: 'subscribe' }))
+          addLog('Sent subscription request', 'info')
+        }
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data)
+            messageCount++
+
+            if (message.type === 'snapshot') {
+              addLog(`Snapshot #${message.sequence} - ${message.bids.length} bids, ${message.asks.length} asks`, 'snapshot')
+              
+              // Update orderbook
+              orderbook.bids = new Map(message.bids)
+              orderbook.asks = new Map(message.asks)
+              lastSequence = message.sequence
+              updateOrderbookPreview()
+            } else if (message.type === 'delta') {
+              // Check for gaps
+              if (lastSequence !== null && message.sequence !== lastSequence + 1) {
+                const gaps = message.sequence - lastSequence - 1
+                gapCount++
+                addLog(`⚠️ GAP DETECTED! Expected ${lastSequence + 1}, got ${message.sequence} (missing ${gaps} updates)`, 'error')
+              }
+
+              addLog(`Delta #${message.sequence} - ${message.bids.length} bid updates, ${message.asks.length} ask updates`, 'delta')
+              
+              // Apply delta
+              message.bids.forEach(([price, size]) => {
+                if (size === 0) {
+                  orderbook.bids.delete(price)
+                } else {
+                  orderbook.bids.set(price, size)
+                }
+              })
+              message.asks.forEach(([price, size]) => {
+                if (size === 0) {
+                  orderbook.asks.delete(price)
+                } else {
+                  orderbook.asks.set(price, size)
+                }
+              })
+              
+              lastSequence = message.sequence
+              updateOrderbookPreview()
+            } else if (message.type === 'pong') {
+              addLog('Pong received', 'info')
+            }
+
+            updateStats()
+          } catch (error) {
+            addLog(`Error parsing message: ${error.message}`, 'error')
+          }
+        }
+
+        ws.onerror = (error) => {
+          addLog(`WebSocket error: ${error.message || 'Unknown error'}`, 'error')
+        }
+
+        ws.onclose = () => {
+          addLog('Disconnected from server', 'info')
+          updateStatus(false)
+          lastSequence = null
+        }
+      } catch (error) {
+        addLog(`Connection error: ${error.message}`, 'error')
+      }
+    }
+
+    function disconnect() {
+      if (ws) {
+        ws.close()
+        ws = null
+      }
+    }
+
+    function clearLog() {
+      document.getElementById('log').innerHTML = ''
+    }
+
+    // Auto-connect on load (optional)
+    // connect()
+  </script>
+</body>
+</html>
+
